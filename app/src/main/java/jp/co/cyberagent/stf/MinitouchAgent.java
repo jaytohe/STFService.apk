@@ -30,16 +30,19 @@ import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.MotionEvent;
 
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.lang.reflect.InvocationTargetException;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
-import java.util.NoSuchElementException;
-import java.util.Scanner;
+
+import java.util.HashMap;
+import java.util.Map.Entry;
+import java.util.Iterator;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 import jp.co.cyberagent.stf.compat.InputManagerWrapper;
 import jp.co.cyberagent.stf.compat.WindowManagerWrapper;
@@ -53,24 +56,69 @@ public class MinitouchAgent extends Thread {
     private static final int DEFAULT_MAX_PRESSURE = 0;
     private final int width;
     private final int height;
+    private int activePointers = -1;
     private LocalServerSocket serverSocket;
 
-    private MotionEvent.PointerProperties[] pointerProperties = new MotionEvent.PointerProperties[2];
-    private MotionEvent.PointerCoords[] pointerCoords = new MotionEvent.PointerCoords[2];
-    private PointerEvent[] events = new PointerEvent[2];
-
+    private final HashMap<Integer, PointerContact> PointerContacts;
     private final InputManagerWrapper inputManager;
     private final WindowManagerWrapper windowManager;
     private final Handler handler;
 
-    private class PointerEvent {
-        long lastMouseDown;
-        int lastX;
-        int lastY;
-        int action;
+    public MinitouchAgent(int width, int height, Handler handler) {
+        this.width = width;
+        this.height = height;
+        this.handler = handler;
+        inputManager = new InputManagerWrapper();
+        windowManager = new WindowManagerWrapper();
+        PointerContacts = new HashMap<Integer, PointerContact>();
+   }
+
+    /*
+     * PointerContact represents a input contact to the screen.
+     * A contact can be down, up or moving.
+     * The state of it is checked with the corresponding isDown, isCommited, markedFor Removal.
+     *
+     */
+    private class PointerContact {
+       MotionEvent.PointerCoords current;
+        MotionEvent.PointerProperties properties;
+        boolean isCommited = false;
+        boolean markedForRemoval = false;
+        boolean isDown = false;
+        long last_down;
+
+        public PointerContact(int[] v) {
+            this.properties = new MotionEvent.PointerProperties();
+            this.properties.id = ++activePointers; //default base pointer 1 id = 0
+            this.properties.toolType = MotionEvent.TOOL_TYPE_FINGER;
+            //this.previous = new MotionEvent.PointerCoords();
+            this.current = new MotionEvent.PointerCoords();
+            this.last_down = System.currentTimeMillis();
+            setPointerCoords(this.current, v);
+        }
+
+        public void setPointerCoords(MotionEvent.PointerCoords t, int[] v) {
+            t.orientation = 0;
+            t.pressure = v[2];
+            t.size = 1;
+            float[] coords = convertCoordinates(v);
+            t.x = coords[0];
+            t.y = coords[1];
+        }
+
+	/* Find real position on screen for a given v vector where v = {x, y, pressure} */
+        private float[] convertCoordinates(int[] v) {
+            int rotation = windowManager.getRotation();
+            double rad = Math.toRadians(rotation * 90.0);
+            return new float[]{
+                (float) (v[0] * Math.cos(-rad) - v[1] * Math.sin(-rad)),
+                (float) (rotation * width) + (float) (v[0] * Math.sin(-rad) + v[1] * Math.cos(-rad)),
+            };
+        }
     }
 
-    /**
+
+   /**
      * Get the width and height of the display by getting the DisplayInfo through reflection
      * Using the android.hardware.display.DisplayManagerGlobal but there might be other ways.
      *
@@ -122,50 +170,79 @@ public class MinitouchAgent extends Thread {
         handler.post(() -> inputManager.injectInputEvent(event));
     }
 
-    private MotionEvent getMotionEvent(PointerEvent p) {
-        return getMotionEvent(p,0);
-    }
-
-    private MotionEvent getMotionEvent(PointerEvent p, int idx) {
-        long now = SystemClock.uptimeMillis();
-        if (p.action == MotionEvent.ACTION_DOWN) {
-            p.lastMouseDown = now;
+    /*
+     * Procedure that fills in a PointerProperties array based on the pointers that are currently active/onscreen.
+     */
+    private void getActivePointerProperties(MotionEvent.PointerProperties[] properties) {
+        int index = 0;
+        for(int i=0; i<properties.length; ++i) {
+            properties[i] = new MotionEvent.PointerProperties();
         }
-        MotionEvent.PointerCoords coords = pointerCoords[idx];
-        int rotation = windowManager.getRotation();
-        double rad = Math.toRadians(rotation * 90.0);
-        coords.x = (float)(p.lastX * Math.cos(-rad) - p.lastY * Math.sin(-rad));
-        coords.y = (rotation * width)+(float)(p.lastX * Math.sin(-rad) + p.lastY * Math.cos(-rad));
-        return MotionEvent.obtain(p.lastMouseDown, now, p.action, idx+1, pointerProperties,
-            pointerCoords, 0, 0, 1f, 1f, 0, 0,
-            InputDevice.SOURCE_TOUCHSCREEN, 0);
-    }
-
-    private List<MotionEvent> getMotionEvent(PointerEvent p1, PointerEvent p2) {
-        List<MotionEvent> combinedEvents = new ArrayList<>(2);
-        long now = SystemClock.uptimeMillis();
-        if (p1.action != MotionEvent.ACTION_MOVE) {
-            combinedEvents.add(getMotionEvent(p1));
-            combinedEvents.add(getMotionEvent(p2,1));
-        } else {
-            MotionEvent.PointerCoords coords1 = pointerCoords[0];
-            MotionEvent.PointerCoords coords2 = pointerCoords[1];
-            int rotation = windowManager.getRotation();
-            double rad = Math.toRadians(rotation * 90.0);
-
-            coords1.x = (float) (p1.lastX * Math.cos(-rad) - p1.lastY * Math.sin(-rad));
-            coords1.y = (rotation * width) + (float) (p1.lastX * Math.sin(-rad) + p1.lastY * Math.cos(-rad));
-
-            coords2.x = (float) (p2.lastX * Math.cos(-rad) - p2.lastY * Math.sin(-rad));
-            coords2.y = (rotation * width) + (float) (p2.lastX * Math.sin(-rad) + p2.lastY * Math.cos(-rad));
-
-            MotionEvent event = MotionEvent.obtain(p1.lastMouseDown, now, p1.action, 2, pointerProperties,
-                pointerCoords, 0, 0, 1f, 1f, 0, 0,
-                InputDevice.SOURCE_TOUCHSCREEN, 0);
-            combinedEvents.add(event);
+        for (PointerContact pc: PointerContacts.values()) {
+            properties[index].id = pc.properties.id;
+            properties[index].toolType = pc.properties.toolType;
+            System.out.println("["+index+"]: "+"[pid, tooltype]:"+ properties[index].id+", "+properties[index].toolType+"]");
+            ++index;
         }
-        return combinedEvents;
     }
+    /*
+     * Procedure that fills in a PointerCoords array based on the pointer that are currently on screen.
+     */
+    private void getActivePointerCoords(MotionEvent.PointerCoords[] coords) {
+        int index = 0;
+        for(int i=0; i<coords.length; ++i) {
+            coords[i] = new MotionEvent.PointerCoords();
+        }
+        for (PointerContact pc: PointerContacts.values()) {
+            if (pc.current == null) {
+                System.out.println("current is null");
+                return;
+            }
+            coords[index].x = pc.current.x;
+            coords[index].y = pc.current.y;
+            coords[index].orientation = pc.current.orientation;
+            coords[index].size = pc.current.size;
+            System.out.println("["+index+"]: "+"[x,y] : ["+coords[index].x+ ", "+coords[index].y+"]");
+            ++index;
+        }
+    }
+
+    /*
+     * @param pc is a new PointerContact obj for a new pointer to be displayed.
+     * @param action is the action = {down, up, move} that pc will perform on screen.
+     * @return an injectable MotionEvent for a new pointer action.
+     */
+    private MotionEvent getMotionEvent(PointerContact pc, int action) {
+        long now = SystemClock.uptimeMillis();
+        long time = (action == MotionEvent.ACTION_DOWN) ? now: pc.last_down;
+        //long time = now;
+
+        //Kind of a wonky solution since properties and coords need to be reconstructed each time there's a press on the screen.
+        // Didn't realize I was gonna need this until after coding the PointerContacts hashmap. Oh well, works for now.
+        // TODO:: Make it more efficient by reworking the hashmap and adding pointercorrds[] and pointerprops[] as keys.
+        MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[PointerContacts.size()];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[PointerContacts.size()];
+
+        //Fill in properties and coords
+        System.out.println("Sending motion event with properties, coords:");
+        getActivePointerProperties(properties);
+        getActivePointerCoords(coords);
+        System.out.println("activePointers: "+activePointers+ ", action : "+action);
+        return MotionEvent.obtain(time,
+            now,
+            action,
+            activePointers+1,
+            properties,
+            coords,
+            0,
+            0,
+            1f,
+            1f,
+            0,
+            0,
+            InputDevice.SOURCE_TOUCHSCREEN,
+            0
+        );
 
     private void sendBanner(LocalSocket clientSocket) {
         try{
@@ -206,94 +283,172 @@ public class MinitouchAgent extends Thread {
      *
      * @param clientSocket the socket to read on
      */
-    private void processCommandLoop(LocalSocket clientSocket) throws IOException{
+    private void processCommandLoop(LocalSocket clientSocket) throws IOException {
         try (BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()))) {
             String cmd;
-            int count = 0;
+            Pattern[] valid_cmd_regex = new Pattern[]{
+                Pattern.compile("c"),
+                Pattern.compile("w ([0-9]+)"),
+                Pattern.compile("u ([0-9]+)"),
+                Pattern.compile("d ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)"),
+                Pattern.compile("m ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)"),
+            };
             while ((cmd = in.readLine()) != null) {
-                try (Scanner scanner = new Scanner(cmd)) {
-                    scanner.useDelimiter(" ");
-                    String type = scanner.next();
-                    int contact;
-                    switch (type) {
-                        case "c":
-                            if (count == 1) {
-                                injectEvent(getMotionEvent(events[0]));
-                            } else if (count == 2) {
-                                for (MotionEvent event : getMotionEvent(events[0], events[1])) {
-                                    injectEvent(event);
-                                }
-                            } else {
-                                System.out.println("count not manage events #" + count);
-                            }
-                            count = 0;
-                            break;
-                        case "u":
-                            count++;
-                            contact = scanner.nextInt();
-                            events[contact].action = (contact == 0) ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_2_UP;
-                            break;
-                        case "d":
-                            count++;
-                            contact = scanner.nextInt();
-                            events[contact].lastX = scanner.nextInt();
-                            events[contact].lastY = scanner.nextInt();
-                            //scanner.nextInt(); //pressure is currently not supported
-                            events[contact].action = (contact == 0) ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_2_DOWN;
-                            break;
-                        case "m":
-                            count++;
-                            contact = scanner.nextInt();
-                            events[contact].lastX = scanner.nextInt();
-                            events[contact].lastY = scanner.nextInt();
-                            //scanner.nextInt(); //pressure is currently not supported
-                            events[contact].action = MotionEvent.ACTION_MOVE;
-                            break;
-                        case "w":
-                            int delayMs = scanner.nextInt();
-                            Thread.sleep(delayMs);
-                            break;
-                        default:
-                            System.out.println("could not parse: " + cmd);
+                for(int k=0; k<valid_cmd_regex.length; ++k) {
+                    Matcher m = valid_cmd_regex[k].matcher(cmd);
+                    if (m.matches()) {
+                        switch(k) {
+                            case 0:
+                                cmd_commit();
+                                break;
+                            case 1:
+                                cmd_wait(m.group(1));
+                                break;
+                            case 2:
+                                cmd_up(m.group(1));
+                                break;
+
+                            case 3:
+                                cmd_pos(0, m.group(1), m.group(2), m.group(3), m.group(4));
+                                break;
+
+                            case 4:
+                                cmd_pos(1, m.group(1), m.group(2), m.group(3), m.group(4));
+                                break;
+                        }
+                        break;
                     }
-                } catch (NoSuchElementException e) {
-                    System.out.println("could not parse: " + cmd);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
                 }
             }
         }
     }
 
-    public MinitouchAgent(int width, int height, Handler handler) {
-        this.width = width;
-        this.height = height;
-        this.handler = handler;
-        inputManager = new InputManagerWrapper();
-        windowManager = new WindowManagerWrapper();
-        MotionEvent.PointerProperties pointerProps0 = new MotionEvent.PointerProperties();
-        pointerProps0.id = 0;
-        pointerProps0.toolType = MotionEvent.TOOL_TYPE_FINGER;
-        MotionEvent.PointerProperties pointerProps1 = new MotionEvent.PointerProperties();
-        pointerProps1.id = 1;
-        pointerProps1.toolType = MotionEvent.TOOL_TYPE_FINGER;
-        pointerProperties[0] = pointerProps0;
-        pointerProperties[1] = pointerProps1;
-
-        MotionEvent.PointerCoords pointerCoords0 = new MotionEvent.PointerCoords();
-        MotionEvent.PointerCoords pointerCoords1 = new MotionEvent.PointerCoords();
-        pointerCoords0.orientation = 0;
-        pointerCoords0.pressure = 1; // pressure and size have to be set
-        pointerCoords0.size = 1;
-        pointerCoords1.orientation = 0;
-        pointerCoords1.pressure = 1;
-        pointerCoords1.size = 1;
-        pointerCoords[0] = pointerCoords0;
-        pointerCoords[1] = pointerCoords1;
-
-        events[0] = new PointerEvent();
-        events[1] = new PointerEvent();
+    /*
+     * @return the pointer action id by shifting ACTION_POINTER_INDEX_SHIFT pointer_id times.  
+     */
+    private int calcActionPointer(int action, int pointer_id) {
+        return action+(pointer_id << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
     }
+
+    /*
+     * Runs when the user presses the c key. For more details see minitouch protocol.
+     */
+    private void cmd_commit() {
+        System.out.println("Called commit.");
+        //int pointer_id = Integer.parseInt(pid);
+        Iterator<Entry<Integer, PointerContact>> entryIt = PointerContacts.entrySet().iterator();
+        while (entryIt.hasNext()) {
+            //if (PointerContacts.containsKey(pointer_id)) { //means there's at least a `d` action
+            //    PointerContact pc = PointerContacts.get(pointer_id);
+            Entry<Integer, PointerContact>  entry = entryIt.next();
+            PointerContact pc = entry.getValue();
+                if (pc.markedForRemoval) {
+                    //send UP event here
+                    System.out.println("Injecting up");
+                    if (pc.properties.id == 0) {
+                        injectEvent(getMotionEvent(pc, MotionEvent.ACTION_UP));
+                    } else {
+                        injectEvent(getMotionEvent(pc, calcActionPointer(MotionEvent.ACTION_POINTER_UP, pc.properties.id)));
+                    }
+                    entryIt.remove(); //safely remove item to prevent ConcurrentModifationException
+                    if (activePointers > -1)
+                        activePointers--;
+                } else if (!pc.isCommited) {
+                    if (pc.isDown) {
+                        //send MOVE event here
+                        System.out.println("Injecting move");
+                        injectEvent(getMotionEvent(pc, MotionEvent.ACTION_MOVE));
+                    } else {
+                        //send DOWN event here
+                       System.out.println("Injecting down with pid: "+pc.properties.id);
+
+                        if (pc.properties.id == 0) {
+                            injectEvent(getMotionEvent(pc, MotionEvent.ACTION_DOWN));
+                        } else {
+                            injectEvent(getMotionEvent(pc, calcActionPointer(MotionEvent.ACTION_POINTER_DOWN, pc.properties.id)));
+                        }
+                        pc.isDown = true;
+                    }
+                    pc.isCommited = true;
+                }
+           // }
+        }
+        cmd_print();
+    }
+
+    /*
+     *Debug method that prints out the contents of the PointerContacts hashmap.
+     *
+     */
+    private void cmd_print() {
+        Iterator<Entry<Integer, PointerContact>> entryIt = PointerContacts.entrySet().iterator();
+        while(entryIt.hasNext()) {
+            Entry<Integer, PointerContact> entry = entryIt.next();
+            PointerContact q = entry.getValue();
+            System.out.println(entry.getKey()+" ["+q.current.x+","+q.current.y+"]");
+        }
+
+    }
+
+    /*
+     *Sleeps thread <num> ms.
+     *
+     */
+    private void cmd_wait(String dt) {
+        System.out.println("Called wait.");
+        long t = Long.parseLong(dt);
+        try {
+            Thread.sleep(t);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /*
+     *Runs when user issues `d` (down) command or `m` command (move). 
+     *
+     */
+    private void cmd_pos(int mode, String pid, String x, String y, String prs) {
+        System.out.println("Called pos.");
+        int pointer_id = Integer.parseInt(pid);
+        int pointer_x = Integer.parseInt(x);
+        int pointer_y = Integer.parseInt(y);
+        int pointer_prs = Integer.parseInt(prs);
+        if (mode == 0) { //down
+            if (!PointerContacts.containsKey(pointer_id)) {
+                PointerContacts.put(pointer_id, new PointerContact(new int[]{pointer_x, pointer_y, pointer_prs}));
+            }
+        }
+        else if (mode == 1) { //move
+            if (PointerContacts.containsKey(pointer_id)) { // means that contact is commitable
+                PointerContact pc = PointerContacts.get(pointer_id);
+                if (pc.isCommited && !pc.markedForRemoval) {
+                    pc.setPointerCoords(pc.current, new int[]{pointer_x, pointer_y, pointer_prs});
+                    pc.isCommited = false; //flip commited to abide to minitouch protocol.
+                    PointerContacts.put(pointer_id, pc);
+                }
+            }
+        }
+        cmd_print();
+    }
+
+    private void cmd_up (String pid) {
+        System.out.println("Called up.");
+        int pointer_id = Integer.parseInt(pid);
+
+        if (!PointerContacts.containsKey(pointer_id)) {
+            System.out.printf("Pointer #%d does not exist!\n", pointer_id);
+        }
+        else {
+            PointerContact pc = PointerContacts.get(pointer_id);
+            if (pc.isCommited && !pc.markedForRemoval) {
+                pc.markedForRemoval = true;
+                pc.isCommited = false;
+            }
+        }
+        cmd_print();
+    }
+
 
     @Override
     public void run() {
