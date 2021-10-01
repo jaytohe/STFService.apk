@@ -175,12 +175,9 @@ public class MinitouchAgent extends Thread {
      */
     private void getActivePointerProperties(MotionEvent.PointerProperties[] properties) {
         int index = 0;
-        for(int i=0; i<properties.length; ++i) {
-            properties[i] = new MotionEvent.PointerProperties();
-        }
         for (PointerContact pc: PointerContacts.values()) {
-            properties[index].id = pc.properties.id;
-            properties[index].toolType = pc.properties.toolType;
+            properties[index] = new MotionEvent.PointerProperties();
+            properties[index] = pc.properties; //shallow copy properties obj to array.
             System.out.println("["+index+"]: "+"[pid, tooltype]:"+ properties[index].id+", "+properties[index].toolType+"]");
             ++index;
         }
@@ -190,18 +187,9 @@ public class MinitouchAgent extends Thread {
      */
     private void getActivePointerCoords(MotionEvent.PointerCoords[] coords) {
         int index = 0;
-        for(int i=0; i<coords.length; ++i) {
-            coords[i] = new MotionEvent.PointerCoords();
-        }
         for (PointerContact pc: PointerContacts.values()) {
-            if (pc.current == null) {
-                System.out.println("current is null");
-                return;
-            }
-            coords[index].x = pc.current.x;
-            coords[index].y = pc.current.y;
-            coords[index].orientation = pc.current.orientation;
-            coords[index].size = pc.current.size;
+            coords[index] = new MotionEvent.PointerCoords();
+            coords[index] = pc.current; //shallow copy current obj to array.
             System.out.println("["+index+"]: "+"[x,y] : ["+coords[index].x+ ", "+coords[index].y+"]");
             ++index;
         }
@@ -214,12 +202,8 @@ public class MinitouchAgent extends Thread {
      */
     private MotionEvent getMotionEvent(PointerContact pc, int action) {
         long now = SystemClock.uptimeMillis();
-        long time = (action == MotionEvent.ACTION_DOWN) ? now: pc.last_down;
-        //long time = now;
+        long time = (action == MotionEvent.ACTION_DOWN) ? now : pc.last_down;
 
-        //Kind of a wonky solution since properties and coords need to be reconstructed each time there's a press on the screen.
-        // Didn't realize I was gonna need this until after coding the PointerContacts hashmap. Oh well, works for now.
-        // TODO:: Make it more efficient by reworking the hashmap and adding pointercorrds[] and pointerprops[] as keys.
         MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[PointerContacts.size()];
         MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[PointerContacts.size()];
 
@@ -227,11 +211,11 @@ public class MinitouchAgent extends Thread {
         System.out.println("Sending motion event with properties, coords:");
         getActivePointerProperties(properties);
         getActivePointerCoords(coords);
-        System.out.println("activePointers: "+activePointers+ ", action : "+action);
+        System.out.println("activePointers: " + activePointers + ", action : " + action);
         return MotionEvent.obtain(time,
             now,
             action,
-            activePointers+1,
+            activePointers + 1,
             properties,
             coords,
             0,
@@ -243,7 +227,7 @@ public class MinitouchAgent extends Thread {
             InputDevice.SOURCE_TOUCHSCREEN,
             0
         );
-
+    }
     private void sendBanner(LocalSocket clientSocket) {
         try{
             OutputStreamWriter out = new OutputStreamWriter(clientSocket.getOutputStream());
@@ -324,7 +308,7 @@ public class MinitouchAgent extends Thread {
     }
 
     /*
-     * @return the pointer action id by shifting ACTION_POINTER_INDEX_SHIFT pointer_id times.  
+     * @return the pointer action id by shifting ACTION_POINTER_INDEX_SHIFT pointer_id times.
      */
     private int calcActionPointer(int action, int pointer_id) {
         return action+(pointer_id << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
@@ -405,7 +389,7 @@ public class MinitouchAgent extends Thread {
     }
 
     /*
-     *Runs when user issues `d` (down) command or `m` command (move). 
+     *Runs when user issues `d` (down) command or `m` command (move).
      *
      */
     private void cmd_pos(int mode, String pid, String x, String y, String prs) {
